@@ -1,0 +1,963 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "(SO0037) - Real Time Insights on AWS Account Activity: This solution provides an account activity dashboard by analyzing AWS CloudTrail log analytics with Amazon Kinesis Data Analytics"
+Parameters:
+  UserName:
+    Type: String
+    Description: Name of a new web UI user (to be created in Amazon Cognito).
+    AllowedPattern: "^(?=\\s*\\S).*$"
+    ConstraintDescription: " cannot be empty"
+  UserEmail:
+    Type: String
+    Description: Email address for new web UI user. After successfully launching this solution, you will receive an email to this email address with logon instructions.
+    AllowedPattern: "^[_A-Za-z0-9-\\+]+(\\.[_A-Za-z0-9-]+)*@[A-Za-z0-9-]+(\\.[A-Za-z0-9]+)*(\\.[A-Za-z]{2,})$"
+  S3DestinationBucketName:
+      Description: The new S3 bucket for the Web Dashboard UI to be deployed.
+      Type: String
+      AllowedPattern: "^(?=\\s*\\S).*$"
+      ConstraintDescription: " cannot be empty"
+
+Metadata:
+    AWS::CloudFormation::Interface:
+        ParameterGroups:
+            -
+                Label:
+                    default: "Web Dashboard Configuration"
+                Parameters:
+                    - UserName
+                    - UserEmail
+                    - S3DestinationBucketName
+        ParameterLabels:
+            UserName:
+                default: "User Name"
+            UserEmail:
+                default: "User Email Address"
+            S3DestinationBucketName:
+                default: "Dashboard Bucket Name"
+
+Mappings:
+    SourceCode:
+        General:
+            S3Bucket: "%%BUCKET_NAME%%"
+            KeyPrefix: "real-time-insights-account-activity/latest"
+    Send:
+        AnonymousUsage:
+            Data: "Yes"
+
+Resources:
+  CloudTrailS3Bucket:
+      DeletionPolicy: Retain
+      Type: "AWS::S3::Bucket"
+      Properties:
+        LifecycleConfiguration:
+          Rules:
+          - Id: GlacierRule
+            Prefix: glacier
+            Status: Enabled
+            ExpirationInDays: '365'
+            Transitions:
+            - TransitionInDays: '30'
+              StorageClass: Glacier
+  CloudTrailBucketPolicy:
+      DeletionPolicy: Retain
+      Type: "AWS::S3::BucketPolicy"
+      Properties:
+        Bucket:
+          Ref: CloudTrailS3Bucket
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            -
+              Sid: "AWSCloudTrailAclCheck"
+              Effect: "Allow"
+              Principal:
+                Service: "cloudtrail.amazonaws.com"
+              Action: "s3:GetBucketAcl"
+              Resource:
+                !Sub |-
+                  arn:aws:s3:::${CloudTrailS3Bucket}
+            -
+              Sid: "AWSCloudTrailWrite"
+              Effect: "Allow"
+              Principal:
+                Service: "cloudtrail.amazonaws.com"
+              Action: "s3:PutObject"
+              Resource:
+                !Sub |-
+                  arn:aws:s3:::${CloudTrailS3Bucket}/AWSLogs/${AWS::AccountId}/*
+              Condition:
+                StringEquals:
+                  s3:x-amz-acl: "bucket-owner-full-control"
+  GlobalCloudTrail:
+      DependsOn:
+        - CloudTrailBucketPolicy
+        - EnableCloudTrailBucketEncryption
+      Type: "AWS::CloudTrail::Trail"
+      Properties:
+        S3BucketName:
+          Ref: CloudTrailS3Bucket
+        IncludeGlobalServiceEvents: "true"
+        IsLogging: "true"
+        IsMultiRegionTrail: "true"
+  FirehoseRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "firehose.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      Policies:
+        -
+          PolicyName: "FirehosePolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Action:
+                    - "s3:AbortMultipartUpload"
+                    - "s3:GetBucketLocation"
+                    - "s3:GetObject"
+                    - "s3:ListBucket"
+                    - "s3:ListBucketMultipartUploads"
+                Effect: "Allow"
+                Resource:
+                  - !Join ['' , ["arn:aws:s3:::", !GetAtt FirehoseS3Bucket.Arn ]]
+                  - !Join ['' , ["arn:aws:s3:::", !GetAtt FirehoseS3Bucket.Arn, "/*" ]]
+              -
+                Action:
+                    - "logs:PutLogEvents"
+                Effect: "Allow"
+                Resource:
+                  - !Join ['' , ["arn:aws:logs:", !Ref "AWS::Region", ":", !Ref "AWS::AccountId", ":log-group:/aws/kinesisfirehose/*", ":log-stream:*" ]]
+
+  FirehoseLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties:
+      LogGroupName: "CloudTrailFirehoseDestinationLog"
+      RetentionInDays: 7
+  FirehoseLogStream:
+    Type: "AWS::Logs::LogStream"
+    DependsOn: FirehoseLogGroup
+    Properties:
+      LogGroupName: "CloudTrailFirehoseDestinationLog"
+      LogStreamName: "S3Delivery"
+  FireHoseDestination:
+    Type: "AWS::KinesisFirehose::DeliveryStream"
+    DependsOn: FirehoseLogGroup
+    Properties:
+      DeliveryStreamName: "RealTimeInsightsAccountActivityCloudTrailInput"
+      S3DestinationConfiguration:
+        BucketARN: !GetAtt FirehoseS3Bucket.Arn
+        BufferingHints:
+          IntervalInSeconds: 60
+          SizeInMBs: 10
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: "CloudTrailFirehoseDestinationLog"
+          LogStreamName: "S3Delivery"
+        CompressionFormat: "UNCOMPRESSED"
+        EncryptionConfiguration:
+            NoEncryptionConfig: "NoEncryption"
+        Prefix: "cloudtrail-logs/"
+        RoleARN: !GetAtt FirehoseRole.Arn
+  FirehoseS3Bucket:
+      DeletionPolicy: Retain
+      Type: "AWS::S3::Bucket"
+      Properties:
+        LifecycleConfiguration:
+          Rules:
+          - Id: ExpirationRule
+            Status: Enabled
+            ExpirationInDays: '1'
+  FirehoseS3Permissions:
+    Type: 'AWS::S3::BucketPolicy'
+    DependsOn: FirehoseS3Bucket
+    Properties:
+      PolicyDocument:
+        Id: MyPolicy
+        Version: 2012-10-17
+        Statement:
+          - Sid: ReadWrite
+            Effect: Allow
+            Principal:
+               AWS:
+                 - !Join ['' , ["arn:aws:iam::", !Ref "AWS::AccountId" , ":root" ]]
+                 - !GetAtt FirehoseRole.Arn
+            Action: 's3:*'
+            Resource: !Join
+              - ''
+              - - 'arn:aws:s3:::'
+                - !Ref FirehoseS3Bucket
+                - /*
+      Bucket: !Ref FirehoseS3Bucket
+  CloudWatchEventRole:
+    Type: "AWS::IAM::Role"
+    DependsOn: "FireHoseDestination"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "events.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      Policies:
+        -
+          PolicyName: "CloudWatchEventPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              Action:
+                - "firehose:DescribeDeliveryStream"
+                - "firehose:ListDeliveryStreams"
+                - "firehose:PutRecord"
+                - "firehose:PutRecordBatch"
+              Effect: "Allow"
+              Resource: !Join ['' , ["arn:aws:firehose:", !Ref "AWS::Region", ":" ,   !Ref "AWS::AccountId" , ":deliverystream/" , !Ref FireHoseDestination]]
+  CloudTrailRule:
+    Type: "AWS::Events::Rule"
+    DependsOn: "FireHoseDestination"
+    Properties:
+      Description: "Rule to publish all CloudTrail events to Firehose"
+      EventPattern:
+        detail-type:
+          - "AWS API Call via CloudTrail"
+      State: "ENABLED"
+      Targets:
+        -
+          Arn: !Join ['' , ["arn:aws:firehose:", !Ref "AWS::Region", ":" ,   !Ref "AWS::AccountId" , ":deliverystream/" , !Ref FireHoseDestination]]
+          Id: "CloudTrailRuleV1"
+          RoleArn: !GetAtt CloudWatchEventRole.Arn
+  OutputKinesisStream:
+    Type: "AWS::Kinesis::Stream"
+    Properties:
+      Name: "RealTimeInsightsAccountActivityDataSteam"
+      ShardCount: 5
+  OutputFirehoseRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "firehose.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      Policies:
+        -
+          PolicyName: "FirehosePolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Action:
+                  - "s3:AbortMultipartUpload"
+                  - "s3:GetBucketLocation"
+                  - "s3:GetObject"
+                  - "s3:ListBucket"
+                  - "s3:ListBucketMultipartUploads"
+                Effect: "Allow"
+                Resource:
+                  - !Join ['' , ["arn:aws:s3:::", !GetAtt FirehoseS3Bucket.Arn ]]
+                  - !Join ['' , ["arn:aws:s3:::", !GetAtt FirehoseS3Bucket.Arn, "/*" ]]
+              -
+                Action:
+                  - "lambda:InvokeFunction"
+                  - "lambda:GetFunctionConfiguration"
+                Effect: "Allow"
+                Resource: !GetAtt UpdateDDBLambdaFunc.Arn
+              -
+                Action:
+                  - "logs:PutLogEvents"
+                Effect: "Allow"
+                Resource:
+                  - !Join ["", ["arn:aws:logs:", Ref: "AWS::Region", ":", Ref: "AWS::AccountId", ":log-group:/aws/lambda/*"]]
+        -
+          PolicyName: "OutputFirehosePolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              Action:
+                - "kinesis:DescribeStream"
+                - "kinesis:GetShardIterator"
+                - "kinesis:GetRecords"
+              Effect: "Allow"
+              Resource: !GetAtt OutputKinesisStream.Arn
+  OutputFireHoseDestination:
+    Type: "AWS::KinesisFirehose::DeliveryStream"
+    DependsOn: FirehoseLogGroup
+    Properties:
+      DeliveryStreamName: "RealTimeInsightsAccountActivityAnalyticsOutput"
+      DeliveryStreamType: "KinesisStreamAsSource"
+      KinesisStreamSourceConfiguration:
+        KinesisStreamARN: !GetAtt OutputKinesisStream.Arn
+        RoleARN: !GetAtt OutputFirehoseRole.Arn
+      S3DestinationConfiguration:
+        BucketARN: !GetAtt OutputFirehoseS3Bucket.Arn
+        BufferingHints:
+          IntervalInSeconds: 60
+          SizeInMBs: 10
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: "CloudTrailFirehoseDestinationLog"
+          LogStreamName: "S3Delivery"
+        CompressionFormat: "UNCOMPRESSED"
+        EncryptionConfiguration:
+            NoEncryptionConfig: "NoEncryption"
+        Prefix: "cloudtrail-logs/"
+        RoleARN: !GetAtt FirehoseRole.Arn
+  OutputFirehoseS3Bucket:
+      DeletionPolicy: Retain
+      Type: "AWS::S3::Bucket"
+      Properties:
+        LifecycleConfiguration:
+          Rules:
+          - Id: ExpirationRule
+            Status: Enabled
+            ExpirationInDays: '1'
+  OutputFirehoseS3Permissions:
+    Type: 'AWS::S3::BucketPolicy'
+    DependsOn: OutputFirehoseS3Bucket
+    Properties:
+      PolicyDocument:
+        Id: MyPolicy
+        Version: 2012-10-17
+        Statement:
+          - Sid: ReadWrite
+            Effect: Allow
+            Principal:
+               AWS:
+                 - !Join ['' , ["arn:aws:iam::", !Ref "AWS::AccountId" , ":root" ]]
+                 - !GetAtt FirehoseRole.Arn
+            Action: 's3:*'
+            Resource: !Join
+              - ''
+              - - 'arn:aws:s3:::'
+                - !Ref OutputFirehoseS3Bucket
+                - /*
+      Bucket: !Ref OutputFirehoseS3Bucket
+  KinesisAnalyticsRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: kinesisanalytics.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: kaaccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                   - "firehose:DescribeDeliveryStream"
+                   - "firehose:Get*"
+                Resource: !Join ['' , ["arn:aws:firehose:", !Ref "AWS::Region", ":" ,   !Ref "AWS::AccountId" , ":deliverystream/" , !Ref FireHoseDestination]]
+              - Effect: Allow
+                Action:
+                   - "kinesis:PutRecord"
+                   - "kinesis:PutRecords"
+                   - "kinesis:DescribeStream"
+                Resource:
+                   - !GetAtt OutputKinesisStream.Arn
+  KinesisAnalyticsApp:
+    Type: "AWS::KinesisAnalytics::Application"
+    Properties:
+      ApplicationName: "RealTimeInsightsAccountActivityApp"
+      ApplicationDescription: "Real-time-insights-account-activity: Application for parsing CloudTrail logs"
+      ApplicationCode: "CREATE STREAM \"DESTINATION_SQL_STREAM\"\n    ( eventTimeStamp TIMESTAMP, computationType VARCHAR(256), category VARCHAR(1024), subCategory VARCHAR(1024),\n        unit VARCHAR(256), unitValue BIGINT);\nCREATE STREAM \"DESTINATION_ANOMALY_STREAM\"\n    ( eventTimeStamp TIMESTAMP, computationType VARCHAR(256), category VARCHAR(1024), subCategory VARCHAR(1024),\n        unit VARCHAR(256), anomalyScore DOUBLE);\nCREATE STREAM \"TOTAL_CALL_COUNT_STREAM\" \n (eventTimeStamp TIMESTAMP, callCount BIGINT);\n\nCREATE OR REPLACE PUMP \"PUMP_FOR_TOTAL_CALL_COUNT\" AS\n  INSERT INTO \"TOTAL_CALL_COUNT_STREAM\" \n  SELECT STREAM STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND) eventTimeStamp, COUNT(*) totalCalls \n       FROM \"SOURCE_SQL_STREAM_001\" cloudtraillogs\n       GROUP BY STEP(cloudtraillogs.ROWTIME BY INTERVAL '10' SECOND), STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND);\nCREATE OR REPLACE PUMP \"PUMP_FOR_ANOMALY_CALL_COUNT\" AS\n INSERT INTO \"DESTINATION_ANOMALY_STREAM\" \n SELECT eventTimeStamp, 'AnomalyScore', CAST(callCount as VARCHAR(10)), 'None', 'Sum', ANOMALY_SCORE FROM \n TABLE(RANDOM_CUT_FOREST(\n              CURSOR(SELECT STREAM * FROM \"TOTAL_CALL_COUNT_STREAM\"), 100, 256, 100000, 20)); \n  \nCREATE OR REPLACE PUMP \"PUMP_FOR_CALLS_PER_IP\" AS\n  INSERT INTO \"DESTINATION_SQL_STREAM\"\n    SELECT eventTimeStamp, 'CallsPerUniqueIp', sip, 'None', 'Sum', callsPerIp FROM (\n       SELECT STREAM STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '1' MINUTE) eventTimeStamp, COUNT(*) callsPerIp, \"sourceIPAddress\" sip\n       FROM \"SOURCE_SQL_STREAM_001\" cloudtraillogs\n       GROUP BY \"sourceIPAddress\", STEP(cloudtraillogs.ROWTIME BY INTERVAL '1' MINUTE), STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '1' MINUTE));\n       \n       \nCREATE OR REPLACE PUMP \"PUMP_FOR_CALLS_PER_API\" AS\n  INSERT INTO \"DESTINATION_SQL_STREAM\"\n    SELECT eventTimeStamp, 'CallsPerAPI', \"eventSource\", \"eventName\" , 'Sum', callsPerAPI FROM (\n       SELECT STREAM STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND) as eventTimeStamp, COUNT(*) callsPerAPI, \"eventSource\", \"eventName\"\n       FROM \"SOURCE_SQL_STREAM_001\" cloudtraillogs\n       GROUP BY \"eventSource\", \"eventName\", STEP(cloudtraillogs.ROWTIME BY INTERVAL '10' SECOND), STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND));\n\nCREATE OR REPLACE PUMP \"PUMP_FOR_CALLS_PER_SOURCE\" AS\n  INSERT INTO \"DESTINATION_SQL_STREAM\"\n    SELECT eventTimeStamp, 'CallsPerServiceType', \"eventSource\", 'None', 'Sum', callsPerSource FROM (\n       SELECT STREAM STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND) eventTimeStamp, COUNT(*) callsPerSource, \"eventSource\"\n       FROM \"SOURCE_SQL_STREAM_001\" cloudtraillogs\n       GROUP BY \"eventSource\", STEP(cloudtraillogs.ROWTIME BY INTERVAL '10' SECOND), STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND)\n       HAVING \"eventSource\" <> 'ec2.amazonaws.com');\n\nCREATE OR REPLACE PUMP \"PUMP_FOR_EC2_CALLS\" AS\n  INSERT INTO \"DESTINATION_SQL_STREAM\"\n    SELECT eventTimeStamp, 'EC2Calls', \"eventSource\", \"errorCode\", 'Sum', callsPerSource FROM (\n       SELECT STREAM STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND) eventTimeStamp, COUNT(*) callsPerSource, \"errorCode\", \"eventSource\"\n       FROM \"SOURCE_SQL_STREAM_001\" cloudtraillogs\n       GROUP BY \"eventSource\", \"errorCode\", STEP(cloudtraillogs.ROWTIME BY INTERVAL '10' SECOND), STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND)\n       HAVING \"eventSource\" = 'ec2.amazonaws.com');\n       \nCREATE OR REPLACE PUMP \"PUMP_FOR_CALLS_PER_USER\" AS\n  INSERT INTO \"DESTINATION_SQL_STREAM\"\n    SELECT eventTimeStamp, 'CallsPerUser', \"userName\" , 'None', 'Sum', callsPerUser FROM (\n       SELECT STREAM STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND) as eventTimeStamp, COUNT(*) callsPerUser, \"userName\"\n       FROM \"SOURCE_SQL_STREAM_001\" cloudtraillogs\n       GROUP BY \"userName\", STEP(cloudtraillogs.ROWTIME BY INTERVAL '10' SECOND), STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND));\n       \nCREATE OR REPLACE PUMP  \"PUMP_FOR_SUCCESSFUL_CALLS\"  AS\n INSERT INTO \"DESTINATION_SQL_STREAM\"\n   SELECT eventTimeStamp, 'NumberOfSuccessfulCalls', 'All' , 'None', 'Sum', numberOfSuccessfulCalls FROM (\n       SELECT STREAM STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND) AS eventTimeStamp, COUNT(*) numberOfSuccessfulCalls\n       FROM \"SOURCE_SQL_STREAM_001\" cloudtraillogs\n       GROUP BY STEP(cloudtraillogs.ROWTIME BY INTERVAL '10' SECOND), STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND));"
+      Inputs:
+        - NamePrefix: "SOURCE_SQL_STREAM"
+          InputSchema:
+            RecordColumns:
+              - Name: "source"
+                SqlType: "VARCHAR(256)"
+                Mapping: "$.source"
+              - Name: "sourceIPAddress"
+                SqlType: "VARCHAR(64)"
+                Mapping: "$.detail.sourceIPAddress"
+              - Name: "eventSource"
+                SqlType: "VARCHAR(256)"
+                Mapping: "$.detail.eventSource"
+              - Name: "eventName"
+                SqlType: "VARCHAR(1024)"
+                Mapping: "$.detail.eventName"
+              - Name: "userName"
+                SqlType: "VARCHAR(1024)"
+                Mapping: "$.detail.userIdentity.sessionContext.sessionIssuer.userName"
+              - Name: "eventTimestamp"
+                SqlType: "TIMESTAMP"
+                Mapping: "$.detail.eventTime"
+              - Name: "errorCode"
+                Mapping: "$.detail.errorCode"
+                SqlType: "VARCHAR(256)"
+            RecordFormat:
+              RecordFormatType: "JSON"
+              MappingParameters:
+                JSONMappingParameters:
+                  RecordRowPath: "$"
+            RecordEncoding: "UTF-8"
+          KinesisFirehoseInput:
+            ResourceARN: !Join ['' , ["arn:aws:firehose:", !Ref "AWS::Region", ":" ,   !Ref "AWS::AccountId" , ":deliverystream/" , !Ref FireHoseDestination]]
+            RoleARN: !GetAtt KinesisAnalyticsRole.Arn
+  KinesisAnalyticsAppOutputs:
+    Type: "AWS::KinesisAnalytics::ApplicationOutput"
+    DependsOn: KinesisAnalyticsApp
+    Properties:
+      ApplicationName: !Ref KinesisAnalyticsApp
+      Output:
+        DestinationSchema:
+          RecordFormatType: "CSV"
+        KinesisStreamsOutput:
+          ResourceARN: !GetAtt OutputKinesisStream.Arn
+          RoleARN: !GetAtt KinesisAnalyticsRole.Arn
+        Name : "DESTINATION_SQL_STREAM"
+  KinesisAnalyticsAppAnomalyOutput:
+    Type: "AWS::KinesisAnalytics::ApplicationOutput"
+    DependsOn: KinesisAnalyticsApp
+    Properties:
+      ApplicationName: !Ref KinesisAnalyticsApp
+      Output:
+        DestinationSchema:
+          RecordFormatType: "CSV"
+        KinesisStreamsOutput:
+          ResourceARN: !GetAtt OutputKinesisStream.Arn
+          RoleARN: !GetAtt KinesisAnalyticsRole.Arn
+        Name : "DESTINATION_ANOMALY_STREAM"
+
+  CloudTrailAnalyticsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: cloudtrail-log-analytics-metrics
+      AttributeDefinitions:
+      - AttributeName: MetricType
+        AttributeType: S
+      - AttributeName: EventTime
+        AttributeType: S
+      KeySchema:
+      - KeyType: HASH
+        AttributeName: MetricType
+      - KeyType: RANGE
+        AttributeName: EventTime
+      ProvisionedThroughput:
+        ReadCapacityUnits: 50
+        WriteCapacityUnits: 50
+      TimeToLiveSpecification:
+        AttributeName: TimeToLive
+        Enabled: true
+  CloudTrailAnalyticsIPTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: cloudtrail-log-ip-metrics
+      AttributeDefinitions:
+      - AttributeName: Hour
+        AttributeType: S
+      - AttributeName: Minute
+        AttributeType: S
+      KeySchema:
+      - KeyType: HASH
+        AttributeName: Hour
+      - KeyType: RANGE
+        AttributeName: Minute
+      ProvisionedThroughput:
+        ReadCapacityUnits: 20
+        WriteCapacityUnits: 20
+      TimeToLiveSpecification:
+        AttributeName: TimeToLive
+        Enabled: true
+  UpdateDDBLambdaFunc:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region"]]
+        S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"], "update_ddb_from_stream.zip"]]
+      Description: "Real-time-insights-account-activity: Uses Kinesis stream as event source.  Updates DynamoDB table with
+        data from stream."
+      FunctionName: real-time-insights-account-activity-update-ddb
+      Handler: update_ddb_from_stream.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - UpdateDDBLambdaExecutionRole
+        - Arn
+      Runtime: python2.7
+      Timeout: 120
+      Environment:
+        Variables:
+          SEND_ANONYMOUS_DATA: !FindInMap [ "Send", "AnonymousUsage", "Data"]
+          UUID: !GetAtt SolutionUuid.UUID
+          LOG_LEVEL: INFO
+
+  UpdateDDBLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: root
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource:
+            - !Join ["", ["arn:aws:logs:", Ref: "AWS::Region", ":", Ref: "AWS::AccountId", ":log-group:/aws/lambda/real-time-insights-account-activity-update-ddb:*"]]
+          - Effect: Allow
+            Action:
+            - kinesis:GetRecords
+            - kinesis:GetShardIterator
+            - kinesis:DescribeStream
+            - kinesis:ListStreams
+            Resource:
+            - Fn::GetAtt:
+                - OutputKinesisStream
+                - Arn
+          - Effect: Allow
+            Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            Resource:
+            - !Join ["", ["arn:aws:dynamodb:", Ref: "AWS::Region", ":", Ref: "AWS::AccountId", ":table/cloudtrail-log-analytics-metrics"]]
+            - !Join ["", ["arn:aws:dynamodb:", Ref: "AWS::Region", ":", Ref: "AWS::AccountId", ":table/cloudtrail-log-ip-metrics"]]
+
+  LambdaEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn:
+        Fn::GetAtt:
+        - OutputKinesisStream
+        - Arn
+      FunctionName:
+        Fn::GetAtt:
+        - UpdateDDBLambdaFunc
+        - Arn
+      StartingPosition: LATEST
+      Enabled: true
+
+  S3DestinationBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Ref: S3DestinationBucketName
+      WebsiteConfiguration:
+        IndexDocument: dash.html
+  S3DestinationBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: S3DestinationBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: AddPerm
+          Effect: Allow
+          Principal: "*"
+          Action:
+          - s3:GetObject
+          Resource:
+          - Fn::Join:
+            - ''
+            - - 'arn:aws:s3:::'
+              - Ref: S3DestinationBucketName
+              - "/*"
+
+  CognitoUserPool:
+      Type: "AWS::Cognito::UserPool"
+      Properties:
+          UserPoolName: "real-time-account-activity-user-pool"
+          AliasAttributes:
+              - "email"
+          AutoVerifiedAttributes:
+              - "email"
+          AdminCreateUserConfig:
+              AllowAdminCreateUserOnly: True
+              InviteMessageTemplate:
+                  EmailMessage:
+                    !Sub |
+                        <p>You are invited to join the CloudTrail analytics dashboard. Your dashboard credentials are as follows:</p>
+                        <p>
+                        Username: <strong>{username}</strong><br />
+                        Password: <strong>{####}</strong>
+                        </p>
+                        <p>
+                        Please sign in to the dashboard with the user name and your temporary password provided above at: <br />
+                        https://s3.${AWS::Region}.amazonaws.com/${S3DestinationBucket}/dash.html
+                        </p>
+                  EmailSubject: "Your CloudTrail Insight Dashboard Login"
+              UnusedAccountValidityDays: 7
+          EmailVerificationMessage:
+              !Sub |
+                  <p>You are invited to join the CloudTrail analytics dashboard. Your dashboard credentials are as follows:</p>
+                  <p>
+                  Username: <strong>{username}</strong><br />
+                  Password: <strong>{####}</strong>
+                  </p>
+                  <p>
+                  Please sign in to the dashboard with the user name and temporary password provided above at: <br />
+                  https://s3.${AWS::Region}.amazonaws.com/${S3DestinationBucket}/dash.html
+                  </p>
+          EmailVerificationSubject: "Your CloudTrail Insight Dashboard Login"
+          Policies:
+              PasswordPolicy:
+                    MinimumLength: 8
+                    RequireLowercase: True
+                    RequireNumbers: True
+                    RequireSymbols: False
+                    RequireUppercase: True
+          Schema:
+              -
+                  AttributeDataType: "String"
+                  Name: "email"
+                  Required: True
+
+  CognitoUserPoolClient:
+      Type: "AWS::Cognito::UserPoolClient"
+      Properties:
+          ClientName: "real-time-account-activity-report"
+          GenerateSecret: False
+          WriteAttributes:
+              - "address"
+              - "email"
+              - "phone_number"
+          ReadAttributes:
+              - "name"
+              - "email"
+              - "email_verified"
+              - "address"
+              - "phone_number"
+              - "phone_number_verified"
+          RefreshTokenValidity: 1
+          UserPoolId: !Ref CognitoUserPool
+
+  CognitoIdentityPool:
+      Type: "AWS::Cognito::IdentityPool"
+      Properties:
+          IdentityPoolName: "Realtime_Account_Activity_Pool"
+          CognitoIdentityProviders:
+            - ClientId: !Ref CognitoUserPoolClient
+              ProviderName: !GetAtt CognitoUserPool.ProviderName
+          AllowUnauthenticatedIdentities: false
+
+  CognitoIdentityPoolRoleAttachment:
+      Type: "AWS::Cognito::IdentityPoolRoleAttachment"
+      Properties:
+          IdentityPoolId: !Sub "${CognitoIdentityPool}"
+          Roles:
+              unauthenticated: !GetAtt UnauthenticatedUserRole.Arn
+              authenticated: !GetAtt AuthenticatedUserRole.Arn
+
+  AuthenticatedUserRole:
+    Type: AWS::IAM::Role
+    Properties:
+        AssumeRolePolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+                -
+                    Effect: "Allow"
+                    Principal:
+                        Federated:
+                            - "cognito-identity.amazonaws.com"
+                    Action:
+                            - "sts:AssumeRoleWithWebIdentity"
+                    Condition:
+                        StringEquals:
+                            "cognito-identity.amazonaws.com:aud": !Sub "${CognitoIdentityPool}"
+                        "ForAnyValue:StringLike":
+                            "cognito-identity.amazonaws.com:amr": "authenticated"
+        Path: "/"
+        Policies:
+          - PolicyName: root
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                  -
+                      Effect: "Allow"
+                      Action:
+                          - "cognito-sync:*"
+                          - "cognito-identity:*"
+                      Resource: !Sub "arn:aws:cognito-identity:${AWS::Region}:${AWS::AccountId}:identitypool/${CognitoIdentityPool}"
+                  - Effect: Allow
+                    Action:
+                    - dynamodb:BatchGetItem
+                    - dynamodb:GetItem
+                    - dynamodb:GetRecords
+                    - dynamodb:GetShardIterator
+                    - dynamodb:Query
+                    - dynamodb:Scan
+                    Resource:
+                    - !Join ["", ["arn:aws:dynamodb:", Ref: "AWS::Region", ":", Ref: "AWS::AccountId", ":table/cloudtrail-log-analytics-metrics"]]
+                    - !Join ["", ["arn:aws:dynamodb:", Ref: "AWS::Region", ":", Ref: "AWS::AccountId", ":table/cloudtrail-log-ip-metrics"]]
+  UnauthenticatedUserRole:
+    Type: AWS::IAM::Role
+    Properties:
+        AssumeRolePolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+                -
+                    Effect: "Allow"
+                    Principal:
+                        Federated:
+                            - "cognito-identity.amazonaws.com"
+                    Action:
+                            - "sts:AssumeRoleWithWebIdentity"
+                    Condition:
+                        StringEquals:
+                            "cognito-identity.amazonaws.com:aud": !Sub "${CognitoIdentityPool}"
+                        ForAnyValue:StringLike:
+                            "cognito-identity.amazonaws.com:amr": "unauthenticated"
+        Path: "/"
+        Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              -
+                  Effect: "Allow"
+                  Action:
+                      - "mobileanalytics:PutEvents"
+                      - "cognito-sync:*"
+                  Resource: !Sub "arn:aws:cognito-identity:${AWS::Region}:${AWS::AccountId}:identitypool/${CognitoIdentityPool}"
+
+  WebCognitoUser:
+      Type: "AWS::Cognito::UserPoolUser"
+      DependsOn: [StartKinesisAnalyticsApp]
+      Properties:
+          DesiredDeliveryMediums:
+              - EMAIL
+          ForceAliasCreation: True
+          UserAttributes:
+              -
+                  Name: email
+                  Value: !Ref UserEmail
+              -
+                  Name: email_verified
+                  Value: True
+          Username: !Ref UserName
+          UserPoolId: !Ref CognitoUserPool
+
+  UIWebsite:
+      Type: "Custom::LoadLambda"
+      Properties:
+          ServiceToken:
+              Fn::GetAtt:
+                  - "CustomResourceHelper"
+                  - "Arn"
+          Region:
+              - Ref: "AWS::Region"
+          sourceS3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region"]]
+          sourceS3key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"], "web_site"]]
+          destS3Bucket: !Ref S3DestinationBucket
+          userPoolId: !Ref CognitoUserPool
+          userPoolClientId: !Ref CognitoUserPoolClient
+          identityPoolId: !Ref CognitoIdentityPool
+          region: !Ref "AWS::Region"
+          UUID: !GetAtt SolutionUuid.UUID
+          anonymousData: !FindInMap ["Send", "AnonymousUsage", "Data"]
+          customAction: "configureWebsite"
+
+  SolutionUuid:
+      Type: "Custom::LoadLambda"
+      Properties:
+          ServiceToken:
+              Fn::GetAtt:
+                  - "CustomResourceHelper"
+                  - "Arn"
+          Region:
+              - Ref: "AWS::Region"
+          customAction: "createUuid"
+
+  EnableCloudTrailBucketEncryption:
+      Type: "Custom::LoadLambda"
+      Properties:
+          ServiceToken:
+              Fn::GetAtt:
+                  - "CustomResourceHelper"
+                  - "Arn"
+          Region:
+              - Ref: "AWS::Region"
+          customAction: "enableDefaultBucketEncryption"
+          S3Bucket: !Ref CloudTrailS3Bucket
+          SSEAlgorithm: "AES256"
+
+  EnableFirehoseBucketEncryption:
+      Type: "Custom::LoadLambda"
+      Properties:
+          ServiceToken:
+              Fn::GetAtt:
+                  - "CustomResourceHelper"
+                  - "Arn"
+          Region:
+              - Ref: "AWS::Region"
+          customAction: "enableDefaultBucketEncryption"
+          S3Bucket: !Ref FirehoseS3Bucket
+          SSEAlgorithm: "AES256"
+
+  EnableOutputFirehoseBucketEncryption:
+      Type: "Custom::LoadLambda"
+      Properties:
+          ServiceToken:
+              Fn::GetAtt:
+                  - "CustomResourceHelper"
+                  - "Arn"
+          Region:
+              - Ref: "AWS::Region"
+          customAction: "enableDefaultBucketEncryption"
+          S3Bucket: !Ref OutputFirehoseS3Bucket
+          SSEAlgorithm: "AES256"
+
+  StartKinesisAnalyticsApp:
+      Type: "Custom::LoadLambda"
+      DependsOn: [KinesisAnalyticsAppOutputs, KinesisAnalyticsAppAnomalyOutput]
+      Properties:
+          ServiceToken:
+              Fn::GetAtt:
+                  - "CustomResourceHelper"
+                  - "Arn"
+          Region:
+              - Ref: "AWS::Region"
+          customAction: "startKinesisApplication"
+          ApplicationName: !Ref KinesisAnalyticsApp
+
+  SolutionAnonymousMetric:
+      Type: "Custom::LoadLambda"
+      Properties:
+          ServiceToken:
+              Fn::GetAtt:
+                  - "CustomResourceHelper"
+                  - "Arn"
+          Region:
+              - Ref: "AWS::Region"
+          solutionId: "SO0037"
+          UUID: !GetAtt SolutionUuid.UUID
+          version: "1"
+          anonymousData: !FindInMap ["Send", "AnonymousUsage", "Data"]
+          customAction: "sendMetric"
+
+  CustomResourceHelperRole:
+      Type: "AWS::IAM::Role"
+      Properties:
+          RoleName: !Join ["-", ["real-time-insights-acct-act-cust-resource", Ref: "AWS::Region" ]]
+          AssumeRolePolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                  -
+                      Effect: "Allow"
+                      Principal:
+                          Service:
+                              - "lambda.amazonaws.com"
+                      Action:
+                              - "sts:AssumeRole"
+          Path: "/"
+          Policies:
+              -
+                  PolicyName: "CustomResourceHelperPolicy"
+                  PolicyDocument:
+                      Version: "2012-10-17"
+                      Statement:
+                          -
+                              Effect: "Allow"
+                              Action:
+                                  - "logs:CreateLogGroup"
+                                  - "logs:CreateLogStream"
+                                  - "logs:PutLogEvents"
+                              Resource:
+                                  - !Join ["", ["arn:aws:logs:", Ref: "AWS::Region", ":", Ref: "AWS::AccountId", ":log-group:/aws/lambda/real-time-insights-account-activity-helper:*"]]
+                          -
+                              Effect: "Allow"
+                              Action:
+                                  - "s3:GetObject"
+                              Resource:
+                                - !Join ["", [
+                                  "arn:aws:s3:::",
+                                  !FindInMap ["SourceCode", "General", "S3Bucket"], "-", Ref: "AWS::Region",
+                                  "/", !FindInMap ["SourceCode", "General", "KeyPrefix"],  "/*"
+                                ]]
+                          -
+                              Effect: "Allow"
+                              Action:
+                                  - "s3:PutObject"
+                              Resource:
+                                  - !Join ["", ["arn:aws:s3:::", Ref: S3DestinationBucket, "/*" ]]
+                          -
+                              Effect: "Allow"
+                              Action:
+                                  - "s3:PutEncryptionConfiguration"
+                              Resource:
+                                  - !Join ["", ["arn:aws:s3:::", Ref: CloudTrailS3Bucket ]]
+                                  - !Join ["", ["arn:aws:s3:::", Ref: FirehoseS3Bucket ]]
+                                  - !Join ["", ["arn:aws:s3:::", Ref: OutputFirehoseS3Bucket ]]
+                          -
+                              Effect: Allow
+                              Action:
+                                  - kinesisanalytics:DescribeApplication
+                                  - kinesisanalytics:StartApplication
+                              Resource:
+                                  - !Join ["", ["arn:aws:kinesisanalytics:", Ref: "AWS::Region", ":", Ref: "AWS::AccountId", ":application/", Ref: KinesisAnalyticsApp]]
+
+  CustomResourceHelper:
+      Type: "AWS::Lambda::Function"
+      Properties:
+          Code:
+              S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region"]]
+              S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"],  "custom-resource-helper.zip"]]
+          Description: "Real-time-insightes-account-activity: A custom resource helper function for solution deployment"
+          FunctionName: "real-time-insights-account-activity-helper"
+          Handler: "index.handler"
+          MemorySize: "256"
+          Role:
+              Fn::GetAtt:
+                  - "CustomResourceHelperRole"
+                  - "Arn"
+          Runtime: "nodejs6.10"
+          Timeout: "300"
+
+Outputs:
+  DashboardURL:
+    Description: The URL for the dashboard.
+    Value: !Sub https://s3.${AWS::Region}.amazonaws.com/${S3DestinationBucket}/dash.html
+  BucketName:
+    Value: !Ref 'CloudTrailS3Bucket'
+    Description: Name of the sample Amazon S3 bucket that stores CloudTrail logs
+  KinesisAnalyticsApplication:
+    Value: !Ref 'KinesisAnalyticsApp'
+    Description: Name of the Kinesis Analytics Application used to parse CloudTrail logs
+  TrailName:
+    Value: !Ref 'GlobalCloudTrail'
+    Description: CloudTrail Name
+  UserPoolId:
+      Description: "Id of Amazon Cognito User Pool"
+      Value: !Ref CognitoUserPool
+  UserPoolClientId:
+      Description: "Id of Web UI client app"
+      Value: !Ref CognitoUserPoolClient
+  UUID:
+      Description: "Solution UUID"
+      Value: !GetAtt SolutionUuid.UUID

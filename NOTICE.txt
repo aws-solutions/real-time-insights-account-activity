@@ -1,0 +1,2 @@
+Real Time Insights into AWS Account Activity
+Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
