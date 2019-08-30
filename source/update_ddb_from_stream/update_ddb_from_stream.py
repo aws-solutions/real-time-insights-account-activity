@@ -1,34 +1,34 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
-##############################################################################
-#  Copyright 2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.   #
-#                                                                            #
-#  Licensed under the Amazon Software License (the 'License'). You may not   #
-#  use this file except in compliance with the License. A copy of the        #
-#  License is located at                                                     #
-#                                                                            #
-#      http://aws.amazon.com/asl/                                            #
-#                                                                            #
-#  or in the 'license' file accompanying this file. This file is distributed #
-#  on an 'AS IS' BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,        #
-#  express or implied. See the License for the specific language governing   #
-#  permissions and limitations under the License.                            #
-##############################################################################
+# #####################################################################################################################
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.                                            #
+#                                                                                                                     #
+# Licensed under the Apache License, Version 2.0 (the "License"). You may not use this file except in compliance     #
+# with the License. A copy of the License is located at                                                              #
+#                                                                                                                     #
+#      http://www.apache.org/licenses/LICENSE-2.0                                                                     #
+#                                                                                                                     #
+# or in the 'license' file accompanying this file. This file is distributed on an 'AS IS' BASIS, WITHOUT WARRANTIES  #
+# OR CONDITIONS OF ANY KIND, express or implied. See the License for the specific language governing permissions     #
+# and limitations under the License.                                                                                 #
+#######################################################################################################################
+ 
+# @author Solution Builders 
 
-from __future__ import print_function
 from itertools import groupby
 import boto3
 import botocore
 import base64
 import os
 import logging
-import urllib2
+import urllib.request
+import urllib.parse
 from json import loads,dumps
 from collections import OrderedDict
 from operator import itemgetter
 from random import randint
-from sys import maxint
+from sys import maxsize
 from time import sleep
 
 log_level = str(os.environ.get('LOG_LEVEL')).upper()
@@ -38,8 +38,8 @@ log = logging.getLogger()
 log.setLevel(log_level)
 
 send_anonymous_data = str(os.environ.get('SEND_ANONYMOUS_DATA')).upper()
-ip_table_name = "cloudtrail-log-ip-metrics"
-table_name="cloudtrail-log-analytics-metrics"
+ip_table_name = os.environ.get('IP_TABLE')
+table_name = os.environ.get('TABLE')
 calls_per_ip="CallsPerUniqueIp"
 successful_calls = "NumberOfSuccessfulCalls"
 anomaly_score = "AnomalyScore"
@@ -55,7 +55,7 @@ def update_dynamodb(record_data):
     ddb_data = loads(ddb_record['Item']['Data']['S'])
     concurrency_token = int(ddb_record['Item']['ConcurrencyToken']['N'])
     merged_data = { k : record_data.get(k,0) + ddb_data.get(k,0) for k in set(record_data) | set(ddb_data) }
-    record_data = OrderedDict(sorted(merged_data.iteritems(), key=itemgetter(1), reverse=True))
+    record_data = OrderedDict(sorted(merged_data.items(), key=itemgetter(1), reverse=True))
     put_record(metric_type, event_time, record_data, concurrency_token)
 
 def put_record_with_retry(metric_type, event_time, record_data, merged_data, concurrency_token, attempt=0):
@@ -78,7 +78,7 @@ def put_record(metric_type, event_time, data, concurrency_token=None):
     item = {'MetricType': {'S':metric_type},
              'EventTime':{'S':event_time},
              'Data':{'S':dumps(data)},
-             'ConcurrencyToken':{'N':str(randint(0,maxint))}}
+             'ConcurrencyToken':{'N':str(randint(0,maxsize))}}
     if concurrency_token:
         client.put_item(TableName=table_name, Item=item,
                         ConditionExpression='ConcurrencyToken = :concurrency_token',
@@ -90,7 +90,7 @@ def merge_record_with_ddb(record_data, ddb_record):
     ddb_data = loads(ddb_record['Item']['Data']['S'])
     concurrency_token = int(ddb_record['Item']['ConcurrencyToken']['N'])
     merged_data = { k : record_data.get(k,0) + ddb_data.get(k,0) for k in set(record_data) | set(ddb_data) }
-    merged_data = OrderedDict(sorted(merged_data.iteritems(), key=itemgetter(1), reverse=True))
+    merged_data = OrderedDict(sorted(merged_data.items(), key=itemgetter(1), reverse=True))
     return merged_data
 
 def merge_record_values(metric_key, grouped_rows):
@@ -107,13 +107,15 @@ def sendAnonymousData(event_time,dataDict):
     postDict['TimeStamp'] = event_time
     postDict['Solution'] = 'SO0037'
     postDict['UUID'] = os.environ.get('UUID')
+
     # API Gateway URL to make HTTP POST call
     url = 'https://metrics.awssolutionsbuilder.com/generic'
-    data=dumps(postDict)
+    data = urllib.parse.urlencode(postDict).encode()
     log.debug(data)
+
     headers = {'content-type': 'application/json'}
-    req = urllib2.Request(url, data, headers)
-    rsp = urllib2.urlopen(req)
+    req = urllib.request.Request(url, data, headers)
+    rsp = urllib.request.urlopen(req)
     rspcode = rsp.getcode()
     content = rsp.read()
     log.debug("Response from APIGateway: %s, %s", rspcode, content)
@@ -122,7 +124,7 @@ def lambda_handler(event, context):
     payload = event['Records']
     output = {}
 
-    data = [base64.b64decode(record['kinesis']['data']).strip().split(',') for record in payload]
+    data = [base64.b64decode(record['kinesis']['data']).decode().strip().split(',') for record in payload]
     data = filter(lambda x: x[2]!="null", data)
     log.info(data)
 
@@ -133,7 +135,7 @@ def lambda_handler(event, context):
 
     for record_key in output:
         event_time,metric_type = record_key.split('|')
-        record_data = OrderedDict(sorted(output[record_key].iteritems(), key=itemgetter(1), reverse=True))
+        record_data = OrderedDict(sorted(output[record_key].items(), key=itemgetter(1), reverse=True))
 
         ddb_record = client.get_item(TableName=table_name,
             Key={'MetricType': {'S':metric_type},

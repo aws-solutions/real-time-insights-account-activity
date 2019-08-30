@@ -8,13 +8,13 @@
     "version": "0.0.1",
     "private": "true",
     "dependencies": {
-        "aws-sdk": "*",
         "moment": "*",
         "underscore": "*",
         "password-generator": "*",
         "node-uuid": "*"
     },
     "devDependencies": {
+        "aws-sdk": "*",
         "grunt": "^0.4.5",
         "grunt-aws-lambda": "^0.13.0",
         "grunt-pack": "0.1.*",

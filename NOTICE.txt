@@ -1,2 +1,16 @@
 Real Time Insights into AWS Account Activity
-Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved. 
+ 
+**********************  
+THIRD PARTY COMPONENTS  
+**********************  
+This software includes third party software subject to the following copyrights:  
+ 
+AWS SDK under the Apache License Version 2.0
+underscore under the Massachusetts Institute of Technology (MIT) license 
+moment under the Massachusetts Institute of Technology (MIT) license
+password-generator under the Massachusetts Institute of Technology (MIT) license
+node-uuid under the Massachusetts Institute of Technology (MIT) license
+bootstrap under the Massachusetts Institute of Technology (MIT) license
+chart under the Massachusetts Institute of Technology (MIT) license
+jquery under the Massachusetts Institute of Technology (MIT) license

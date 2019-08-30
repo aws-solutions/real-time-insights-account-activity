@@ -349,7 +349,8 @@ function init() {
 
     var retrieveParams = function(metricType, eventTime) {
         return {
-            TableName: "cloudtrail-log-analytics-metrics",
+            //BUGFIX removed hardcoded table names
+            TableName: metrics_table,
             ConsistentRead: true,
             ScanIndexForward: true,
             KeyConditionExpression: "MetricType = :TrailLog AND EventTime > :currentTime",
@@ -362,7 +363,8 @@ function init() {
         var hour = date[0]+ " " + time[0];
         var min = time[1];
         return {
-            TableName: "cloudtrail-log-ip-metrics",
+            //BUGFIX removed hardcoded table names
+            TableName: ip_table,
             ConsistentRead: true,
             ScanIndexForward: true,
             KeyConditionExpression: "#hour = :hour AND #min > :minute",

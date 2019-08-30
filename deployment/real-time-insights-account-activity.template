@@ -10,7 +10,7 @@ Parameters:
     Type: String
     Description: Email address for new web UI user. After successfully launching this solution, you will receive an email to this email address with logon instructions.
     AllowedPattern: "^[_A-Za-z0-9-\\+]+(\\.[_A-Za-z0-9-]+)*@[A-Za-z0-9-]+(\\.[A-Za-z0-9]+)*(\\.[A-Za-z]{2,})$"
-  S3DestinationBucketName:
+  WebsiteBucketName:
       Description: The new S3 bucket for the Web Dashboard UI to be deployed.
       Type: String
       AllowedPattern: "^(?=\\s*\\S).*$"
@@ -25,38 +25,47 @@ Metadata:
                 Parameters:
                     - UserName
                     - UserEmail
-                    - S3DestinationBucketName
+                    - WebsiteBucketName
         ParameterLabels:
             UserName:
                 default: "User Name"
             UserEmail:
                 default: "User Email Address"
-            S3DestinationBucketName:
+            WebsiteBucketName:
                 default: "Dashboard Bucket Name"
 
 Mappings:
     SourceCode:
         General:
             S3Bucket: "%%BUCKET_NAME%%"
-            KeyPrefix: "real-time-insights-account-activity/latest"
+            KeyPrefix: "%%SOLUTION_NAME%%/%%VERSION%%"
     Send:
         AnonymousUsage:
             Data: "Yes"
 
 Resources:
+
   CloudTrailS3Bucket:
       DeletionPolicy: Retain
       Type: "AWS::S3::Bucket"
       Properties:
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: AES256
         LifecycleConfiguration:
           Rules:
           - Id: GlacierRule
             Prefix: glacier
             Status: Enabled
-            ExpirationInDays: '365'
+            ExpirationInDays: 365
             Transitions:
-            - TransitionInDays: '30'
+            - TransitionInDays: 30
               StorageClass: Glacier
+        LoggingConfiguration:
+          DestinationBucketName: !Ref LogsBucket
+          LogFilePrefix: cloud-trail-bucket/
+
   CloudTrailBucketPolicy:
       DeletionPolicy: Retain
       Type: "AWS::S3::BucketPolicy"
@@ -90,14 +99,14 @@ Resources:
   GlobalCloudTrail:
       DependsOn:
         - CloudTrailBucketPolicy
-        - EnableCloudTrailBucketEncryption
       Type: "AWS::CloudTrail::Trail"
       Properties:
         S3BucketName:
           Ref: CloudTrailS3Bucket
-        IncludeGlobalServiceEvents: "true"
-        IsLogging: "true"
-        IsMultiRegionTrail: "true"
+        IncludeGlobalServiceEvents: True
+        IsLogging: True
+        IsMultiRegionTrail: True
+
   FirehoseRole:
     Type: "AWS::IAM::Role"
     Properties:
@@ -127,14 +136,19 @@ Resources:
                     - "s3:ListBucketMultipartUploads"
                 Effect: "Allow"
                 Resource:
-                  - !Join ['' , ["arn:aws:s3:::", !GetAtt FirehoseS3Bucket.Arn ]]
-                  - !Join ['' , ["arn:aws:s3:::", !GetAtt FirehoseS3Bucket.Arn, "/*" ]]
+                - !Join ['' , ["arn:aws:s3:::", !GetAtt FirehoseS3Bucket.Arn ]]
+                - !Join ['' , ["arn:aws:s3:::", !GetAtt FirehoseS3Bucket.Arn, "/*" ]]
               -
                 Action:
                     - "logs:PutLogEvents"
                 Effect: "Allow"
                 Resource:
                   - !Join ['' , ["arn:aws:logs:", !Ref "AWS::Region", ":", !Ref "AWS::AccountId", ":log-group:/aws/kinesisfirehose/*", ":log-stream:*" ]]
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: "The wildcard action in the logs policy is required"
 
   FirehoseLogGroup:
     Type: "AWS::Logs::LogGroup"
@@ -166,18 +180,26 @@ Resources:
             NoEncryptionConfig: "NoEncryption"
         Prefix: "cloudtrail-logs/"
         RoleARN: !GetAtt FirehoseRole.Arn
+
   FirehoseS3Bucket:
       DeletionPolicy: Retain
       Type: "AWS::S3::Bucket"
       Properties:
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: AES256
         LifecycleConfiguration:
           Rules:
           - Id: ExpirationRule
             Status: Enabled
-            ExpirationInDays: '1'
+            ExpirationInDays: 1
+        LoggingConfiguration:
+          DestinationBucketName: !Ref LogsBucket
+          LogFilePrefix: firehouse-bucket/
+
   FirehoseS3Permissions:
     Type: 'AWS::S3::BucketPolicy'
-    DependsOn: FirehoseS3Bucket
     Properties:
       PolicyDocument:
         Id: MyPolicy
@@ -189,7 +211,7 @@ Resources:
                AWS:
                  - !Join ['' , ["arn:aws:iam::", !Ref "AWS::AccountId" , ":root" ]]
                  - !GetAtt FirehoseRole.Arn
-            Action: 's3:*'
+            Action: ["s3:PutObject","s3:GetObject","s3:DeleteObject"]
             Resource: !Join
               - ''
               - - 'arn:aws:s3:::'
@@ -198,7 +220,6 @@ Resources:
       Bucket: !Ref FirehoseS3Bucket
   CloudWatchEventRole:
     Type: "AWS::IAM::Role"
-    DependsOn: "FireHoseDestination"
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -226,7 +247,6 @@ Resources:
               Resource: !Join ['' , ["arn:aws:firehose:", !Ref "AWS::Region", ":" ,   !Ref "AWS::AccountId" , ":deliverystream/" , !Ref FireHoseDestination]]
   CloudTrailRule:
     Type: "AWS::Events::Rule"
-    DependsOn: "FireHoseDestination"
     Properties:
       Description: "Rule to publish all CloudTrail events to Firehose"
       EventPattern:
@@ -238,11 +258,12 @@ Resources:
           Arn: !Join ['' , ["arn:aws:firehose:", !Ref "AWS::Region", ":" ,   !Ref "AWS::AccountId" , ":deliverystream/" , !Ref FireHoseDestination]]
           Id: "CloudTrailRuleV1"
           RoleArn: !GetAtt CloudWatchEventRole.Arn
+
   OutputKinesisStream:
     Type: "AWS::Kinesis::Stream"
     Properties:
-      Name: "RealTimeInsightsAccountActivityDataSteam"
       ShardCount: 5
+
   OutputFirehoseRole:
     Type: "AWS::IAM::Role"
     Properties:
@@ -272,8 +293,9 @@ Resources:
                   - "s3:ListBucketMultipartUploads"
                 Effect: "Allow"
                 Resource:
-                  - !Join ['' , ["arn:aws:s3:::", !GetAtt FirehoseS3Bucket.Arn ]]
-                  - !Join ['' , ["arn:aws:s3:::", !GetAtt FirehoseS3Bucket.Arn, "/*" ]]
+                - !Join ['' , ["arn:aws:s3:::", !GetAtt FirehoseS3Bucket.Arn ]]
+                - !Join ['' , ["arn:aws:s3:::", !GetAtt FirehoseS3Bucket.Arn, "/*" ]]
+
               -
                 Action:
                   - "lambda:InvokeFunction"
@@ -297,6 +319,12 @@ Resources:
                 - "kinesis:GetRecords"
               Effect: "Allow"
               Resource: !GetAtt OutputKinesisStream.Arn
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: "The wildcard action in the logs policy is required"
+
   OutputFireHoseDestination:
     Type: "AWS::KinesisFirehose::DeliveryStream"
     DependsOn: FirehoseLogGroup
@@ -320,18 +348,26 @@ Resources:
             NoEncryptionConfig: "NoEncryption"
         Prefix: "cloudtrail-logs/"
         RoleARN: !GetAtt FirehoseRole.Arn
+
   OutputFirehoseS3Bucket:
       DeletionPolicy: Retain
       Type: "AWS::S3::Bucket"
       Properties:
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: AES256
         LifecycleConfiguration:
           Rules:
           - Id: ExpirationRule
             Status: Enabled
-            ExpirationInDays: '1'
+            ExpirationInDays: 1
+        LoggingConfiguration:
+          DestinationBucketName: !Ref LogsBucket
+          LogFilePrefix: firehouse-output-bucket/
+
   OutputFirehoseS3Permissions:
     Type: 'AWS::S3::BucketPolicy'
-    DependsOn: OutputFirehoseS3Bucket
     Properties:
       PolicyDocument:
         Id: MyPolicy
@@ -343,13 +379,14 @@ Resources:
                AWS:
                  - !Join ['' , ["arn:aws:iam::", !Ref "AWS::AccountId" , ":root" ]]
                  - !GetAtt FirehoseRole.Arn
-            Action: 's3:*'
+            Action: ["s3:PutObject","s3:GetObject","s3:DeleteObject"]
             Resource: !Join
               - ''
               - - 'arn:aws:s3:::'
                 - !Ref OutputFirehoseS3Bucket
                 - /*
       Bucket: !Ref OutputFirehoseS3Bucket
+
   KinesisAnalyticsRole:
     Type: "AWS::IAM::Role"
     Properties:
@@ -378,11 +415,17 @@ Resources:
                    - "kinesis:DescribeStream"
                 Resource:
                    - !GetAtt OutputKinesisStream.Arn
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: F3
+            reason: "The wildcard action in the kaaccess policy permits the KinesisAnalytics role to read Kinesis Firehose streams and inputs."
+
   KinesisAnalyticsApp:
     Type: "AWS::KinesisAnalytics::Application"
     Properties:
       ApplicationName: "RealTimeInsightsAccountActivityApp"
-      ApplicationDescription: "Real-time-insights-account-activity: Application for parsing CloudTrail logs"
+      ApplicationDescription: "%%SOLUTION_NAME%%: Application for parsing CloudTrail logs"
       ApplicationCode: "CREATE STREAM \"DESTINATION_SQL_STREAM\"\n    ( eventTimeStamp TIMESTAMP, computationType VARCHAR(256), category VARCHAR(1024), subCategory VARCHAR(1024),\n        unit VARCHAR(256), unitValue BIGINT);\nCREATE STREAM \"DESTINATION_ANOMALY_STREAM\"\n    ( eventTimeStamp TIMESTAMP, computationType VARCHAR(256), category VARCHAR(1024), subCategory VARCHAR(1024),\n        unit VARCHAR(256), anomalyScore DOUBLE);\nCREATE STREAM \"TOTAL_CALL_COUNT_STREAM\" \n (eventTimeStamp TIMESTAMP, callCount BIGINT);\n\nCREATE OR REPLACE PUMP \"PUMP_FOR_TOTAL_CALL_COUNT\" AS\n  INSERT INTO \"TOTAL_CALL_COUNT_STREAM\" \n  SELECT STREAM STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND) eventTimeStamp, COUNT(*) totalCalls \n       FROM \"SOURCE_SQL_STREAM_001\" cloudtraillogs\n       GROUP BY STEP(cloudtraillogs.ROWTIME BY INTERVAL '10' SECOND), STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND);\nCREATE OR REPLACE PUMP \"PUMP_FOR_ANOMALY_CALL_COUNT\" AS\n INSERT INTO \"DESTINATION_ANOMALY_STREAM\" \n SELECT eventTimeStamp, 'AnomalyScore', CAST(callCount as VARCHAR(10)), 'None', 'Sum', ANOMALY_SCORE FROM \n TABLE(RANDOM_CUT_FOREST(\n              CURSOR(SELECT STREAM * FROM \"TOTAL_CALL_COUNT_STREAM\"), 100, 256, 100000, 20)); \n  \nCREATE OR REPLACE PUMP \"PUMP_FOR_CALLS_PER_IP\" AS\n  INSERT INTO \"DESTINATION_SQL_STREAM\"\n    SELECT eventTimeStamp, 'CallsPerUniqueIp', sip, 'None', 'Sum', callsPerIp FROM (\n       SELECT STREAM STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '1' MINUTE) eventTimeStamp, COUNT(*) callsPerIp, \"sourceIPAddress\" sip\n       FROM \"SOURCE_SQL_STREAM_001\" cloudtraillogs\n       GROUP BY \"sourceIPAddress\", STEP(cloudtraillogs.ROWTIME BY INTERVAL '1' MINUTE), STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '1' MINUTE));\n       \n       \nCREATE OR REPLACE PUMP \"PUMP_FOR_CALLS_PER_API\" AS\n  INSERT INTO \"DESTINATION_SQL_STREAM\"\n    SELECT eventTimeStamp, 'CallsPerAPI', \"eventSource\", \"eventName\" , 'Sum', callsPerAPI FROM (\n       SELECT STREAM STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND) as eventTimeStamp, COUNT(*) callsPerAPI, \"eventSource\", \"eventName\"\n       FROM \"SOURCE_SQL_STREAM_001\" cloudtraillogs\n       GROUP BY \"eventSource\", \"eventName\", STEP(cloudtraillogs.ROWTIME BY INTERVAL '10' SECOND), STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND));\n\nCREATE OR REPLACE PUMP \"PUMP_FOR_CALLS_PER_SOURCE\" AS\n  INSERT INTO \"DESTINATION_SQL_STREAM\"\n    SELECT eventTimeStamp, 'CallsPerServiceType', \"eventSource\", 'None', 'Sum', callsPerSource FROM (\n       SELECT STREAM STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND) eventTimeStamp, COUNT(*) callsPerSource, \"eventSource\"\n       FROM \"SOURCE_SQL_STREAM_001\" cloudtraillogs\n       GROUP BY \"eventSource\", STEP(cloudtraillogs.ROWTIME BY INTERVAL '10' SECOND), STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND)\n       HAVING \"eventSource\" <> 'ec2.amazonaws.com');\n\nCREATE OR REPLACE PUMP \"PUMP_FOR_EC2_CALLS\" AS\n  INSERT INTO \"DESTINATION_SQL_STREAM\"\n    SELECT eventTimeStamp, 'EC2Calls', \"eventSource\", \"errorCode\", 'Sum', callsPerSource FROM (\n       SELECT STREAM STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND) eventTimeStamp, COUNT(*) callsPerSource, \"errorCode\", \"eventSource\"\n       FROM \"SOURCE_SQL_STREAM_001\" cloudtraillogs\n       GROUP BY \"eventSource\", \"errorCode\", STEP(cloudtraillogs.ROWTIME BY INTERVAL '10' SECOND), STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND)\n       HAVING \"eventSource\" = 'ec2.amazonaws.com');\n       \nCREATE OR REPLACE PUMP \"PUMP_FOR_CALLS_PER_USER\" AS\n  INSERT INTO \"DESTINATION_SQL_STREAM\"\n    SELECT eventTimeStamp, 'CallsPerUser', \"userName\" , 'None', 'Sum', callsPerUser FROM (\n       SELECT STREAM STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND) as eventTimeStamp, COUNT(*) callsPerUser, \"userName\"\n       FROM \"SOURCE_SQL_STREAM_001\" cloudtraillogs\n       GROUP BY \"userName\", STEP(cloudtraillogs.ROWTIME BY INTERVAL '10' SECOND), STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND));\n       \nCREATE OR REPLACE PUMP  \"PUMP_FOR_SUCCESSFUL_CALLS\"  AS\n INSERT INTO \"DESTINATION_SQL_STREAM\"\n   SELECT eventTimeStamp, 'NumberOfSuccessfulCalls', 'All' , 'None', 'Sum', numberOfSuccessfulCalls FROM (\n       SELECT STREAM STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND) AS eventTimeStamp, COUNT(*) numberOfSuccessfulCalls\n       FROM \"SOURCE_SQL_STREAM_001\" cloudtraillogs\n       GROUP BY STEP(cloudtraillogs.ROWTIME BY INTERVAL '10' SECOND), STEP(cloudtraillogs.\"eventTimestamp\" BY INTERVAL '10' SECOND));"
       Inputs:
         - NamePrefix: "SOURCE_SQL_STREAM"
@@ -420,7 +463,6 @@ Resources:
             RoleARN: !GetAtt KinesisAnalyticsRole.Arn
   KinesisAnalyticsAppOutputs:
     Type: "AWS::KinesisAnalytics::ApplicationOutput"
-    DependsOn: KinesisAnalyticsApp
     Properties:
       ApplicationName: !Ref KinesisAnalyticsApp
       Output:
@@ -432,7 +474,8 @@ Resources:
         Name : "DESTINATION_SQL_STREAM"
   KinesisAnalyticsAppAnomalyOutput:
     Type: "AWS::KinesisAnalytics::ApplicationOutput"
-    DependsOn: KinesisAnalyticsApp
+    DependsOn:
+      - KinesisAnalyticsAppOutputs
     Properties:
       ApplicationName: !Ref KinesisAnalyticsApp
       Output:
@@ -446,7 +489,6 @@ Resources:
   CloudTrailAnalyticsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: cloudtrail-log-analytics-metrics
       AttributeDefinitions:
       - AttributeName: MetricType
         AttributeType: S
@@ -463,10 +505,10 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: TimeToLive
         Enabled: true
+
   CloudTrailAnalyticsIPTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: cloudtrail-log-ip-metrics
       AttributeDefinitions:
       - AttributeName: Hour
         AttributeType: S
@@ -483,13 +525,14 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: TimeToLive
         Enabled: true
+
   UpdateDDBLambdaFunc:
     Type: AWS::Lambda::Function
     Properties:
       Code:
         S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region"]]
         S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"], "update_ddb_from_stream.zip"]]
-      Description: "Real-time-insights-account-activity: Uses Kinesis stream as event source.  Updates DynamoDB table with
+      Description: "%%SOLUTION_NAME%%: Uses Kinesis stream as event source.  Updates DynamoDB table with
         data from stream."
       FunctionName: real-time-insights-account-activity-update-ddb
       Handler: update_ddb_from_stream.lambda_handler
@@ -497,13 +540,15 @@ Resources:
         Fn::GetAtt:
         - UpdateDDBLambdaExecutionRole
         - Arn
-      Runtime: python2.7
+      Runtime: python3.7
       Timeout: 120
       Environment:
         Variables:
           SEND_ANONYMOUS_DATA: !FindInMap [ "Send", "AnonymousUsage", "Data"]
           UUID: !GetAtt SolutionUuid.UUID
           LOG_LEVEL: INFO
+          TABLE: !Ref CloudTrailAnalyticsTable
+          IP_TABLE: !Ref CloudTrailAnalyticsIPTable
 
   UpdateDDBLambdaExecutionRole:
     Type: AWS::IAM::Role
@@ -545,8 +590,13 @@ Resources:
             - dynamodb:GetItem
             - dynamodb:PutItem
             Resource:
-            - !Join ["", ["arn:aws:dynamodb:", Ref: "AWS::Region", ":", Ref: "AWS::AccountId", ":table/cloudtrail-log-analytics-metrics"]]
-            - !Join ["", ["arn:aws:dynamodb:", Ref: "AWS::Region", ":", Ref: "AWS::AccountId", ":table/cloudtrail-log-ip-metrics"]]
+            - !Sub ${CloudTrailAnalyticsTable.Arn}
+            - !Sub ${CloudTrailAnalyticsIPTable.Arn}
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: "The wildcard action in the logs policy is required"
 
   LambdaEventSourceMapping:
     Type: AWS::Lambda::EventSourceMapping
@@ -562,32 +612,109 @@ Resources:
       StartingPosition: LATEST
       Enabled: true
 
-  S3DestinationBucket:
+  WebsiteBucket:
     Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W41
+            reason: "WebSiteBucket serves only website assests that will be made available publicly."
     Properties:
       BucketName:
-        Ref: S3DestinationBucketName
+        Ref: WebsiteBucketName
       WebsiteConfiguration:
-        IndexDocument: dash.html
-  S3DestinationBucketPolicy:
-    Type: AWS::S3::BucketPolicy
+        IndexDocument: "dash.html"
+        ErrorDocument: "dash.html"
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LogsBucket
+        LogFilePrefix: website-bucket/
+
+  WebsiteBucketPolicy:
+    Type: "AWS::S3::BucketPolicy"
     Properties:
       Bucket:
-        Ref: S3DestinationBucket
+        Ref: "WebsiteBucket"
       PolicyDocument:
-        Version: '2012-10-17'
         Statement:
-        - Sid: AddPerm
-          Effect: Allow
-          Principal: "*"
-          Action:
-          - s3:GetObject
-          Resource:
-          - Fn::Join:
-            - ''
-            - - 'arn:aws:s3:::'
-              - Ref: S3DestinationBucketName
-              - "/*"
+          -
+            Action:
+              - "s3:GetObject"
+            Effect: "Allow"
+            Resource:
+              Fn::Join:
+                - ""
+                -
+                  - "arn:aws:s3:::"
+                  -
+                    Ref: "WebsiteBucket"
+                  - "/*"
+            Principal:
+              CanonicalUser: !GetAtt WebsiteOriginAccessIdentity.S3CanonicalUserId
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: F16
+            reason: "The wildcard resource in the WebsiteBucket policy permits the GetObject action to be joined dynamically to the WebsiteBucket being generated."
+  WebsiteOriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Sub "access-identity-${WebsiteBucket}"
+
+  ##Logging bucket for cloudFront and other solution buckets
+  LogsBucket:
+    DeletionPolicy: Retain
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: LogDeliveryWrite
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: "This is the logs bucket for all the other S3 Buckets and CloudFront"
+
+  WebsiteDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: "Website distribution for solution"
+        Origins:
+          -
+            Id: S3-solution-website
+            DomainName: !Sub "${WebsiteBucket}.s3.${AWS::Region}.amazonaws.com"
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub "origin-access-identity/cloudfront/${WebsiteOriginAccessIdentity}"
+        DefaultCacheBehavior:
+          TargetOriginId: S3-solution-website
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+          CachedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          ForwardedValues:
+            QueryString: False
+          ViewerProtocolPolicy: redirect-to-https
+        IPV6Enabled: True
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: True
+        Enabled: True
+        HttpVersion: 'http2'
+        Logging:
+          IncludeCookies: False
+          Bucket: !GetAtt LogsBucket.DomainName
+          Prefix: cloudfront-logs/
 
   CognitoUserPool:
       Type: "AWS::Cognito::UserPool"
@@ -609,7 +736,7 @@ Resources:
                         </p>
                         <p>
                         Please sign in to the dashboard with the user name and your temporary password provided above at: <br />
-                        https://s3.${AWS::Region}.amazonaws.com/${S3DestinationBucket}/dash.html
+                        https://${WebsiteDistribution.DomainName}/dash.html
                         </p>
                   EmailSubject: "Your CloudTrail Insight Dashboard Login"
               UnusedAccountValidityDays: 7
@@ -622,7 +749,7 @@ Resources:
                   </p>
                   <p>
                   Please sign in to the dashboard with the user name and temporary password provided above at: <br />
-                  https://s3.${AWS::Region}.amazonaws.com/${S3DestinationBucket}/dash.html
+                  https://${WebsiteDistribution.DomainName}/dash.html
                   </p>
           EmailVerificationSubject: "Your CloudTrail Insight Dashboard Login"
           Policies:
@@ -713,8 +840,13 @@ Resources:
                     - dynamodb:Query
                     - dynamodb:Scan
                     Resource:
-                    - !Join ["", ["arn:aws:dynamodb:", Ref: "AWS::Region", ":", Ref: "AWS::AccountId", ":table/cloudtrail-log-analytics-metrics"]]
-                    - !Join ["", ["arn:aws:dynamodb:", Ref: "AWS::Region", ":", Ref: "AWS::AccountId", ":table/cloudtrail-log-ip-metrics"]]
+                    - !Sub ${CloudTrailAnalyticsTable.Arn}
+                    - !Sub ${CloudTrailAnalyticsIPTable.Arn}
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: F3
+            reason: "The wildcard actions in the root policy permits the AuthenticatedUserRole to synchronize/exhange user identity information with Amazon Cognito."
   UnauthenticatedUserRole:
     Type: AWS::IAM::Role
     Properties:
@@ -745,6 +877,11 @@ Resources:
                       - "mobileanalytics:PutEvents"
                       - "cognito-sync:*"
                   Resource: !Sub "arn:aws:cognito-identity:${AWS::Region}:${AWS::AccountId}:identitypool/${CognitoIdentityPool}"
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: F3
+            reason: "The wildcard action in the root policy permits the UnauthenticatedUserRole to synchronize/exchanged user identity information with Amazon Cognito."
 
   WebCognitoUser:
       Type: "AWS::Cognito::UserPoolUser"
@@ -759,7 +896,7 @@ Resources:
                   Value: !Ref UserEmail
               -
                   Name: email_verified
-                  Value: True
+                  Value: "True"
           Username: !Ref UserName
           UserPoolId: !Ref CognitoUserPool
 
@@ -774,7 +911,8 @@ Resources:
               - Ref: "AWS::Region"
           sourceS3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region"]]
           sourceS3key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"], "web_site"]]
-          destS3Bucket: !Ref S3DestinationBucket
+          sourceManifest: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"], "web-site-manifest.json"]]
+          destS3Bucket: !Ref WebsiteBucket
           userPoolId: !Ref CognitoUserPool
           userPoolClientId: !Ref CognitoUserPoolClient
           identityPoolId: !Ref CognitoIdentityPool
@@ -782,6 +920,9 @@ Resources:
           UUID: !GetAtt SolutionUuid.UUID
           anonymousData: !FindInMap ["Send", "AnonymousUsage", "Data"]
           customAction: "configureWebsite"
+          #BUGFIX removed hardcoded table names:: analyticsTable & ipTable
+          analyticsTable: !Ref CloudTrailAnalyticsTable
+          ipTable: !Ref CloudTrailAnalyticsIPTable
 
   SolutionUuid:
       Type: "Custom::LoadLambda"
@@ -793,45 +934,6 @@ Resources:
           Region:
               - Ref: "AWS::Region"
           customAction: "createUuid"
-
-  EnableCloudTrailBucketEncryption:
-      Type: "Custom::LoadLambda"
-      Properties:
-          ServiceToken:
-              Fn::GetAtt:
-                  - "CustomResourceHelper"
-                  - "Arn"
-          Region:
-              - Ref: "AWS::Region"
-          customAction: "enableDefaultBucketEncryption"
-          S3Bucket: !Ref CloudTrailS3Bucket
-          SSEAlgorithm: "AES256"
-
-  EnableFirehoseBucketEncryption:
-      Type: "Custom::LoadLambda"
-      Properties:
-          ServiceToken:
-              Fn::GetAtt:
-                  - "CustomResourceHelper"
-                  - "Arn"
-          Region:
-              - Ref: "AWS::Region"
-          customAction: "enableDefaultBucketEncryption"
-          S3Bucket: !Ref FirehoseS3Bucket
-          SSEAlgorithm: "AES256"
-
-  EnableOutputFirehoseBucketEncryption:
-      Type: "Custom::LoadLambda"
-      Properties:
-          ServiceToken:
-              Fn::GetAtt:
-                  - "CustomResourceHelper"
-                  - "Arn"
-          Region:
-              - Ref: "AWS::Region"
-          customAction: "enableDefaultBucketEncryption"
-          S3Bucket: !Ref OutputFirehoseS3Bucket
-          SSEAlgorithm: "AES256"
 
   StartKinesisAnalyticsApp:
       Type: "Custom::LoadLambda"
@@ -864,7 +966,6 @@ Resources:
   CustomResourceHelperRole:
       Type: "AWS::IAM::Role"
       Properties:
-          RoleName: !Join ["-", ["real-time-insights-acct-act-cust-resource", Ref: "AWS::Region" ]]
           AssumeRolePolicyDocument:
               Version: "2012-10-17"
               Statement:
@@ -905,7 +1006,7 @@ Resources:
                               Action:
                                   - "s3:PutObject"
                               Resource:
-                                  - !Join ["", ["arn:aws:s3:::", Ref: S3DestinationBucket, "/*" ]]
+                                  - !Join ["", ["arn:aws:s3:::", Ref: WebsiteBucket, "/*" ]]
                           -
                               Effect: "Allow"
                               Action:
@@ -921,6 +1022,11 @@ Resources:
                                   - kinesisanalytics:StartApplication
                               Resource:
                                   - !Join ["", ["arn:aws:kinesisanalytics:", Ref: "AWS::Region", ":", Ref: "AWS::AccountId", ":application/", Ref: KinesisAnalyticsApp]]
+      Metadata:
+        cfn_nag:
+          rules_to_suppress:
+            - id: W11
+              reason: "The wildcard action in the logs policy is required"
 
   CustomResourceHelper:
       Type: "AWS::Lambda::Function"
@@ -931,18 +1037,18 @@ Resources:
           Description: "Real-time-insightes-account-activity: A custom resource helper function for solution deployment"
           FunctionName: "real-time-insights-account-activity-helper"
           Handler: "index.handler"
-          MemorySize: "256"
+          MemorySize: 256
           Role:
               Fn::GetAtt:
                   - "CustomResourceHelperRole"
                   - "Arn"
-          Runtime: "nodejs6.10"
-          Timeout: "300"
+          Runtime: "nodejs8.10"
+          Timeout: 300
 
 Outputs:
   DashboardURL:
     Description: The URL for the dashboard.
-    Value: !Sub https://s3.${AWS::Region}.amazonaws.com/${S3DestinationBucket}/dash.html
+    Value: !Sub https://${WebsiteDistribution.DomainName}/dash.html
   BucketName:
     Value: !Ref 'CloudTrailS3Bucket'
     Description: Name of the sample Amazon S3 bucket that stores CloudTrail logs
@@ -953,11 +1059,11 @@ Outputs:
     Value: !Ref 'GlobalCloudTrail'
     Description: CloudTrail Name
   UserPoolId:
-      Description: "Id of Amazon Cognito User Pool"
-      Value: !Ref CognitoUserPool
+    Description: "Id of Amazon Cognito User Pool"
+    Value: !Ref CognitoUserPool
   UserPoolClientId:
-      Description: "Id of Web UI client app"
-      Value: !Ref CognitoUserPoolClient
+    Description: "Id of Web UI client app"
+    Value: !Ref CognitoUserPoolClient
   UUID:
-      Description: "Solution UUID"
-      Value: !GetAtt SolutionUuid.UUID
+    Description: "Solution UUID"
+    Value: !GetAtt SolutionUuid.UUID

@@ -1,26 +1,25 @@
-/*********************************************************************************************************************
- *  Copyright 2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.                                           *
- *                                                                                                                    *
- *  Licensed under the Amazon Software License (the "License"). You may not use this file except in compliance        *
- *  with the License. A copy of the License is located at                                                             *
- *                                                                                                                    *
- *      http://aws.amazon.com/asl/                                                                                    *
- *                                                                                                                    *
- *  or in the "license" file accompanying this file. This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES *
- *  OR CONDITIONS OF ANY KIND, express or implied. See the License for the specific language governing permissions    *
- *  and limitations under the License.                                                                                *
- *********************************************************************************************************************/
-
-/**
- * @author Solution Builders
- */
+/********************************************************************************************************************* 
+ *  Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.                                           * 
+ *                                                                                                                    * 
+ *  Licensed under the Apache License, Version 2.0 (the "License"). You may not use this file except in compliance    * 
+ *  with the License. A copy of the License is located at                                                             * 
+ *                                                                                                                    * 
+ *      http://www.apache.org/licenses/LICENSE-2.0                                                                    * 
+ *                                                                                                                    * 
+ *  or in the 'license' file accompanying this file. This file is distributed on an 'AS IS' BASIS, WITHOUT WARRANTIES * 
+ *  OR CONDITIONS OF ANY KIND, express or implied. See the License for the specific language governing permissions    * 
+ *  and limitations under the License.                                                                                * 
+ *********************************************************************************************************************/ 
+ 
+/** 
+ * @author Solution Builders 
+ */ 
 
 'use strict';
 
 let AWS = require('aws-sdk');
 let s3 = new AWS.S3();
 const fs = require('fs');
-const _downloadKey = 'real-time-insights-account-activity/latest/web-site-manifest.json';
 const _downloadLocation = '/tmp/web-site-manifest.json';
 
 /**
@@ -49,8 +48,8 @@ let websiteHelper = (function() {
      * @param {string} dashboard_usage - Enable or disable dashaboard use tracking
      * @param {copyWebSiteAssets~requestCallback} cb - The callback that handles the response.
      */
-    websiteHelper.prototype.copyWebSiteAssets = function(sourceS3Bucket, sourceS3prefix, destS3Bucket,
-        userPoolId, userPoolClientId, identityPoolId, region, uuid, dashboard_usage, cb) {
+    websiteHelper.prototype.copyWebSiteAssets = function(sourceS3Bucket, sourceS3prefix, sourceManifest, destS3Bucket,
+        userPoolId, userPoolClientId, identityPoolId, region, uuid, dashboard_usage,metrics_table,ip_table, cb) {
         console.log("Copying UI web site");
         console.log(['source bucket:', sourceS3Bucket].join(' '));
         console.log(['source prefix:', sourceS3prefix].join(' '));
@@ -60,7 +59,7 @@ let websiteHelper = (function() {
         console.log(['identity pool:', identityPoolId].join(' '));
         console.log(['region:', region].join(' '));
 
-        downloadWebisteManifest(sourceS3Bucket, _downloadKey, _downloadLocation, function(err, data) {
+        downloadWebisteManifest(sourceS3Bucket, sourceManifest, _downloadLocation, function(err, data) {
             if (err) {
                 console.log(err);
                 return cb(err, null);
@@ -87,7 +86,7 @@ let websiteHelper = (function() {
 
                             console.log(result);
 
-                            createAppVariables(userPoolId, userPoolClientId, identityPoolId, region, destS3Bucket, uuid, dashboard_usage,
+                            createAppVariables(userPoolId, userPoolClientId, identityPoolId, region, destS3Bucket, uuid, dashboard_usage, metrics_table, ip_table,
                                 function(err, createResult) {
                                     if (err) {
                                         return cb(err, null);
@@ -121,7 +120,7 @@ let websiteHelper = (function() {
         }
     };
 
-    let createAppVariables = function(userPoolId, userPoolClientId, identityPoolId, region, destS3Bucket, uuid, dashboard_usage, cb) {
+    let createAppVariables = function(userPoolId, userPoolClientId, identityPoolId, region, destS3Bucket, uuid, dashboard_usage, metrics_table,ip_table, cb) {
         console.log("Creating AppVariables");
         console.log(['destination bucket:', destS3Bucket].join(' '));
         console.log(['user pool:', userPoolId].join(' '));
@@ -131,6 +130,8 @@ let websiteHelper = (function() {
         console.log(['destS3Bucket:', destS3Bucket].join(' '));
         console.log(['uuid:', uuid].join(' '));
         console.log(['dashboard_usage:', dashboard_usage].join(' '));
+        console.log(['metrics_table:', metrics_table].join(' '));
+        console.log(['ip_table:', ip_table].join(' '));
 
         var _content = [
             ['localStorage.setItem(\'upid\', \'', userPoolId, '\');'].join(''),
@@ -138,6 +139,8 @@ let websiteHelper = (function() {
             ['localStorage.setItem(\'ipid\', \'', identityPoolId, '\');'].join(''),
             ['localStorage.setItem(\'r\', \'', region, '\');'].join(''),
             ['var _dashboard_usage = \'', dashboard_usage, '\';'].join(''),
+            ['var metrics_table = \'', metrics_table, '\';'].join(''),
+            ['var ip_table = \'', ip_table, '\';'].join(''),
             ['var _hit_data = {'],
             ['    \'Solution\': \'SO0037\','],
             ['    \'UUID\': \'',uuid,'\','].join(''),
@@ -227,10 +230,10 @@ let websiteHelper = (function() {
      * @param {string} downloadLocation - Local storage location to download the Amazon S3 object.
      * @param {downloadManifest~requestCallback} cb - The callback that handles the response.
      */
-    let downloadWebisteManifest = function(s3Bucket, s3Key, downloadLocation, cb) {
+    let downloadWebisteManifest = function(s3Bucket, sourceManifest, downloadLocation, cb) {
         let params = {
             Bucket: s3Bucket,
-            Key: s3Key
+            Key: sourceManifest
         };
 
         console.log(params);

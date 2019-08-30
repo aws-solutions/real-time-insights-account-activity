@@ -7,14 +7,17 @@ sudo apt-get update
 sudo apt-get install zip sed wget -y
 sudo pip install --upgrade pip
 sudo pip install --upgrade setuptools
-sudo pip install --upgrade virtualenv```
+sudo pip install --upgrade virtualenv
 ```
 
 ## Building Lambda Package
 ```bash
+export DIST_OUTPUT_BUCKET=my-bucket-name # bucket where customized code will reside
+export VERSION=my-version # version number for the customized code
 cd deployment
-./build-s3-dist.sh source-bucket-base-name
+./build-s3-dist.sh $DIST_OUTPUT_BUCKET real-time-insights-account-activity $VERSION
 ```
+
 source-bucket-base-name should be the base name for the S3 bucket location where the template will source the Lambda code from.
 The template will append '-[region_name]' to this value.
 For example: ./build-s3-dist.sh solutions
@@ -22,7 +25,6 @@ The template will then expect the source code to be located in the solutions-[re
 
 ## CF template and Lambda function
 Located in deployment/dist
-
 
 ***
 
