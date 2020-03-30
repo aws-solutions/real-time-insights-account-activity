@@ -1,0 +1,13 @@
+# Compiled output
+**/dist
+**/.zip
+**/global-s3-assets
+**/regional-s3-assets
+**/open-source
+
+# Dependencies
+node_modules/
+package-lock.json
+
+# Misc
+**/.DS_Store

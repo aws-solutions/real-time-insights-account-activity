@@ -1,5 +1,5 @@
 Real Time Insights into AWS Account Activity
-Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved. 
+Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved. 
  
 **********************  
 THIRD PARTY COMPONENTS  

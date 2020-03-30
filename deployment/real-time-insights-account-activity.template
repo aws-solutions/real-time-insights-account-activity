@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "(SO0037) - Real Time Insights on AWS Account Activity: This solution provides an account activity dashboard by analyzing AWS CloudTrail log analytics with Amazon Kinesis Data Analytics"
+Description: "(SO0037) - Real Time Insights on AWS Account Activity (Version %%VERSION%%): This solution provides an account activity dashboard by analyzing AWS CloudTrail log analytics with Amazon Kinesis Data Analytics"
 Parameters:
   UserName:
     Type: String
@@ -49,6 +49,11 @@ Resources:
       DeletionPolicy: Retain
       Type: "AWS::S3::Bucket"
       Properties:
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: True
+          BlockPublicPolicy: True
+          IgnorePublicAcls: True
+          RestrictPublicBuckets: True
         BucketEncryption:
           ServerSideEncryptionConfiguration:
             - ServerSideEncryptionByDefault:
@@ -144,11 +149,6 @@ Resources:
                 Effect: "Allow"
                 Resource:
                   - !Join ['' , ["arn:aws:logs:", !Ref "AWS::Region", ":", !Ref "AWS::AccountId", ":log-group:/aws/kinesisfirehose/*", ":log-stream:*" ]]
-    Metadata:
-      cfn_nag:
-        rules_to_suppress:
-          - id: W11
-            reason: "The wildcard action in the logs policy is required"
 
   FirehoseLogGroup:
     Type: "AWS::Logs::LogGroup"
@@ -185,6 +185,11 @@ Resources:
       DeletionPolicy: Retain
       Type: "AWS::S3::Bucket"
       Properties:
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: True
+          BlockPublicPolicy: True
+          IgnorePublicAcls: True
+          RestrictPublicBuckets: True
         BucketEncryption:
           ServerSideEncryptionConfiguration:
             - ServerSideEncryptionByDefault:
@@ -262,6 +267,9 @@ Resources:
   OutputKinesisStream:
     Type: "AWS::Kinesis::Stream"
     Properties:
+      StreamEncryption:
+        EncryptionType: KMS
+        KeyId: !Sub arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/kinesis
       ShardCount: 5
 
   OutputFirehoseRole:
@@ -319,11 +327,6 @@ Resources:
                 - "kinesis:GetRecords"
               Effect: "Allow"
               Resource: !GetAtt OutputKinesisStream.Arn
-    Metadata:
-      cfn_nag:
-        rules_to_suppress:
-          - id: W11
-            reason: "The wildcard action in the logs policy is required"
 
   OutputFireHoseDestination:
     Type: "AWS::KinesisFirehose::DeliveryStream"
@@ -353,6 +356,11 @@ Resources:
       DeletionPolicy: Retain
       Type: "AWS::S3::Bucket"
       Properties:
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: True
+          BlockPublicPolicy: True
+          IgnorePublicAcls: True
+          RestrictPublicBuckets: True
         BucketEncryption:
           ServerSideEncryptionConfiguration:
             - ServerSideEncryptionByDefault:
@@ -415,11 +423,6 @@ Resources:
                    - "kinesis:DescribeStream"
                 Resource:
                    - !GetAtt OutputKinesisStream.Arn
-    Metadata:
-      cfn_nag:
-        rules_to_suppress:
-          - id: F3
-            reason: "The wildcard action in the kaaccess policy permits the KinesisAnalytics role to read Kinesis Firehose streams and inputs."
 
   KinesisAnalyticsApp:
     Type: "AWS::KinesisAnalytics::Application"
@@ -540,7 +543,7 @@ Resources:
         Fn::GetAtt:
         - UpdateDDBLambdaExecutionRole
         - Arn
-      Runtime: python3.7
+      Runtime: python3.8
       Timeout: 120
       Environment:
         Variables:
@@ -592,11 +595,6 @@ Resources:
             Resource:
             - !Sub ${CloudTrailAnalyticsTable.Arn}
             - !Sub ${CloudTrailAnalyticsIPTable.Arn}
-    Metadata:
-      cfn_nag:
-        rules_to_suppress:
-          - id: W11
-            reason: "The wildcard action in the logs policy is required"
 
   LambdaEventSourceMapping:
     Type: AWS::Lambda::EventSourceMapping
@@ -615,11 +613,6 @@ Resources:
   WebsiteBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
-    Metadata:
-      cfn_nag:
-        rules_to_suppress:
-          - id: W41
-            reason: "WebSiteBucket serves only website assests that will be made available publicly."
     Properties:
       BucketName:
         Ref: WebsiteBucketName
@@ -629,6 +622,15 @@ Resources:
       LoggingConfiguration:
         DestinationBucketName: !Ref LogsBucket
         LogFilePrefix: website-bucket/
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
 
   WebsiteBucketPolicy:
     Type: "AWS::S3::BucketPolicy"
@@ -651,11 +653,6 @@ Resources:
                   - "/*"
             Principal:
               CanonicalUser: !GetAtt WebsiteOriginAccessIdentity.S3CanonicalUserId
-    Metadata:
-      cfn_nag:
-        rules_to_suppress:
-          - id: F16
-            reason: "The wildcard resource in the WebsiteBucket policy permits the GetObject action to be joined dynamically to the WebsiteBucket being generated."
   WebsiteOriginAccessIdentity:
     Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
     Properties:
@@ -668,6 +665,11 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       AccessControl: LogDeliveryWrite
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -677,6 +679,8 @@ Resources:
         rules_to_suppress:
           - id: W35
             reason: "This is the logs bucket for all the other S3 Buckets and CloudFront"
+          - id: W51
+            reason: "Policy not required for this bucket."
 
   WebsiteDistribution:
     Type: AWS::CloudFront::Distribution
@@ -1022,11 +1026,6 @@ Resources:
                                   - kinesisanalytics:StartApplication
                               Resource:
                                   - !Join ["", ["arn:aws:kinesisanalytics:", Ref: "AWS::Region", ":", Ref: "AWS::AccountId", ":application/", Ref: KinesisAnalyticsApp]]
-      Metadata:
-        cfn_nag:
-          rules_to_suppress:
-            - id: W11
-              reason: "The wildcard action in the logs policy is required"
 
   CustomResourceHelper:
       Type: "AWS::Lambda::Function"
@@ -1042,7 +1041,7 @@ Resources:
               Fn::GetAtt:
                   - "CustomResourceHelperRole"
                   - "Arn"
-          Runtime: "nodejs8.10"
+          Runtime: "nodejs12.x"
           Timeout: 300
 
 Outputs:
