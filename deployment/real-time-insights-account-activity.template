@@ -155,6 +155,11 @@ Resources:
     Properties:
       LogGroupName: "CloudTrailFirehoseDestinationLog"
       RetentionInDays: 7
+    Metadata:
+      cfn_nag:
+          rules_to_suppress:
+            - id: "W84"
+              reason: "using service dafault encryption https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/data-protection.html"
   FirehoseLogStream:
     Type: "AWS::Logs::LogStream"
     DependsOn: FirehoseLogGroup
@@ -166,6 +171,8 @@ Resources:
     DependsOn: FirehoseLogGroup
     Properties:
       DeliveryStreamName: "RealTimeInsightsAccountActivityCloudTrailInput"
+      DeliveryStreamEncryptionConfigurationInput:
+          KeyType: 'AWS_OWNED_CMK'
       S3DestinationConfiguration:
         BucketARN: !GetAtt FirehoseS3Bucket.Arn
         BufferingHints:
@@ -492,6 +499,9 @@ Resources:
   CloudTrailAnalyticsTable:
     Type: AWS::DynamoDB::Table
     Properties:
+      BillingMode: PROVISIONED
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
       - AttributeName: MetricType
         AttributeType: S
@@ -505,6 +515,8 @@ Resources:
       ProvisionedThroughput:
         ReadCapacityUnits: 50
         WriteCapacityUnits: 50
+      SSESpecification: 
+        SSEEnabled: true        
       TimeToLiveSpecification:
         AttributeName: TimeToLive
         Enabled: true
@@ -512,6 +524,9 @@ Resources:
   CloudTrailAnalyticsIPTable:
     Type: AWS::DynamoDB::Table
     Properties:
+      BillingMode: PROVISIONED
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
       - AttributeName: Hour
         AttributeType: S
@@ -525,6 +540,8 @@ Resources:
       ProvisionedThroughput:
         ReadCapacityUnits: 20
         WriteCapacityUnits: 20
+      SSESpecification: 
+        SSEEnabled: true 
       TimeToLiveSpecification:
         AttributeName: TimeToLive
         Enabled: true
@@ -552,6 +569,13 @@ Resources:
           LOG_LEVEL: INFO
           TABLE: !Ref CloudTrailAnalyticsTable
           IP_TABLE: !Ref CloudTrailAnalyticsIPTable
+    Metadata:
+          cfn_nag: 
+              rules_to_suppress: 
+                - id: "W89"
+                  reason: "not a valid use case for VPC deployment"
+                - id: "W92"
+                  reason: "not a valid reserved concurrency"
 
   UpdateDDBLambdaExecutionRole:
     Type: AWS::IAM::Role
@@ -719,6 +743,11 @@ Resources:
           IncludeCookies: False
           Bucket: !GetAtt LogsBucket.DomainName
           Prefix: cloudfront-logs/
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W70
+            reason: "distribution does not use Aliases https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-cloudfront-distribution-viewercertificate.html#cfn-cloudfront-distribution-viewercertificate-cloudfrontdefaultcertificate"
 
   CognitoUserPool:
       Type: "AWS::Cognito::UserPool"
@@ -1043,6 +1072,17 @@ Resources:
                   - "Arn"
           Runtime: "nodejs12.x"
           Timeout: 300
+      Metadata:
+          cfn_nag: 
+              rules_to_suppress: 
+                - id: "W89"
+                  reason: "not a valid use case for VPC deployment"
+                - id: "W92"
+                  reason: "not a valid reserved concurrency"
+            
+          
+        
+        
 
 Outputs:
   DashboardURL:
