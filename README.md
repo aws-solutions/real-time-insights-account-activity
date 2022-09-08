@@ -1,3 +1,5 @@
+# Note: As of 09/08/2022, Real-Time Insights on AWS Account Activity has been deprecated. The code is no longer being maintained.
+
 # AWS Real-Time Insights into AWS Account Activity with Kinesis Analytics
 
 This AWS Solution leverages AWS CloudTrail, AWS Kinesis Analytics, Amazon DynamoDB, AWS Lambda, Amazon S3, Amazon Cognito, and Chart.js to provide real-time insights into AWS account activity.
